@@ -10,7 +10,6 @@ import (
 	"github.com/jinzhu/gorm"
 	_ "github.com/lib/pq"
 	_ "github.com/mattn/go-sqlite3"
-	_ "github.com/mattn/go-sqlite3"
 
 	"os"
 	"reflect"
@@ -1084,7 +1083,7 @@ func TestFindOrInitialize(t *testing.T) {
 }
 
 func TestFindOrCreate(t *testing.T) {
-	var user1, user2, user3, user4, user5, user6, user7 User
+	var user1, user2, user3, user4, user5, user6, user7, user8 User
 	db.Where(&User{Name: "find or create", Age: 33}).FirstOrCreate(&user1)
 	if user1.Name != "find or create" || user1.Id == 0 || user1.Age != 33 {
 		t.Errorf("user should be created with search value")
@@ -1105,6 +1104,12 @@ func TestFindOrCreate(t *testing.T) {
 		t.Errorf("user should be created with search value and attrs")
 	}
 
+	updated_at1 := user4.UpdatedAt
+	db.Where(&User{Name: "find or create 3"}).Assign("age", 55).FirstOrCreate(&user4)
+	if updated_at1.Format(time.RFC3339Nano) == user4.UpdatedAt.Format(time.RFC3339Nano) {
+		t.Errorf("UpdateAt should be changed when update values with assign")
+	}
+
 	db.Where(&User{Name: "find or create 4"}).Assign(User{Age: 44}).FirstOrCreate(&user4)
 	if user4.Name != "find or create 4" || user4.Id == 0 || user4.Age != 44 {
 		t.Errorf("user should be created with search value and assigned attrs")
@@ -1123,6 +1128,15 @@ func TestFindOrCreate(t *testing.T) {
 	db.Where(&User{Name: "find or create"}).Find(&user7)
 	if user7.Name != "find or create" || user7.Id == 0 || user7.Age != 44 {
 		t.Errorf("user should be found and updated with assigned attrs")
+	}
+
+	db.Where(&User{Name: "find or create embedded struct"}).Assign(User{Age: 44, CreditCard: CreditCard{Number: "1231231231"}, Emails: []Email{{Email: "jinzhu@assign_embedded_struct.com"}, {Email: "jinzhu-2@assign_embedded_struct.com"}}}).FirstOrCreate(&user8)
+	if db.Where("email = ?", "jinzhu-2@assign_embedded_struct.com").First(&Email{}).RecordNotFound() {
+		t.Errorf("embedded struct email should be saved")
+	}
+
+	if db.Where("email = ?", "1231231231").First(&CreditCard{}).RecordNotFound() {
+		t.Errorf("embedded struct credit card should be saved")
 	}
 }
 
