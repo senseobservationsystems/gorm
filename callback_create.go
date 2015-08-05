@@ -3,63 +3,101 @@ package gorm
 import (
 	"fmt"
 	"strings"
-	"time"
 )
 
 func BeforeCreate(scope *Scope) {
-	scope.CallMethod("BeforeSave")
-	scope.CallMethod("BeforeCreate")
+	scope.CallMethodWithErrorCheck("BeforeSave")
+	scope.CallMethodWithErrorCheck("BeforeCreate")
 }
 
 func UpdateTimeStampWhenCreate(scope *Scope) {
 	if !scope.HasError() {
-		scope.SetColumn("CreatedAt", time.Now())
-		scope.SetColumn("UpdatedAt", time.Now())
+		now := NowFunc()
+		scope.SetColumn("CreatedAt", now)
+		scope.SetColumn("UpdatedAt", now)
 	}
 }
 
 func Create(scope *Scope) {
-	defer scope.Trace(time.Now())
+	defer scope.Trace(NowFunc())
 
 	if !scope.HasError() {
 		// set create sql
 		var sqls, columns []string
-
-		for _, field := range scope.Fields() {
-			if field.DBName != scope.PrimaryKey() && len(field.SqlTag) > 0 && !field.IsIgnored {
-				columns = append(columns, scope.Quote(field.DBName))
-				sqls = append(sqls, scope.AddToVars(field.Value))
+		fields := scope.Fields()
+		for _, field := range fields {
+			if scope.changeableField(field) {
+				if field.IsNormal {
+					if !field.IsPrimaryKey || (field.IsPrimaryKey && !field.IsBlank) {
+						if !field.IsBlank || !field.HasDefaultValue {
+							columns = append(columns, scope.Quote(field.DBName))
+							sqls = append(sqls, scope.AddToVars(field.Field.Interface()))
+						}
+					}
+				} else if relationship := field.Relationship; relationship != nil && relationship.Kind == "belongs_to" {
+					for _, dbName := range relationship.ForeignDBNames {
+						if relationField := fields[dbName]; !scope.changeableField(relationField) {
+							columns = append(columns, scope.Quote(relationField.DBName))
+							sqls = append(sqls, scope.AddToVars(relationField.Field.Interface()))
+						}
+					}
+				}
 			}
 		}
 
-		scope.Raw(fmt.Sprintf(
-			"INSERT INTO %v (%v) VALUES (%v) %v",
-			scope.TableName(),
-			strings.Join(columns, ","),
-			strings.Join(sqls, ","),
-			scope.Dialect().ReturningStr(scope.PrimaryKey()),
-		))
+		returningKey := "*"
+		primaryField := scope.PrimaryField()
+		if primaryField != nil {
+			returningKey = scope.Quote(primaryField.DBName)
+		}
+
+		if len(columns) == 0 {
+			scope.Raw(fmt.Sprintf("INSERT INTO %v DEFAULT VALUES %v",
+				scope.QuotedTableName(),
+				scope.Dialect().ReturningStr(scope.TableName(), returningKey),
+			))
+		} else {
+			scope.Raw(fmt.Sprintf(
+				"INSERT INTO %v (%v) VALUES (%v) %v",
+				scope.QuotedTableName(),
+				strings.Join(columns, ","),
+				strings.Join(sqls, ","),
+				scope.Dialect().ReturningStr(scope.TableName(), returningKey),
+			))
+		}
 
 		// execute create sql
-		var id interface{}
 		if scope.Dialect().SupportLastInsertId() {
-			if sql_result, err := scope.DB().Exec(scope.Sql, scope.SqlVars...); scope.Err(err) == nil {
-				id, err = sql_result.LastInsertId()
-				scope.Err(err)
+			if result, err := scope.SqlDB().Exec(scope.Sql, scope.SqlVars...); scope.Err(err) == nil {
+				id, err := result.LastInsertId()
+				if scope.Err(err) == nil {
+					scope.db.RowsAffected, _ = result.RowsAffected()
+					if primaryField != nil && primaryField.IsBlank {
+						scope.Err(scope.SetColumn(primaryField, id))
+					}
+				}
 			}
 		} else {
-			scope.Err(scope.DB().QueryRow(scope.Sql, scope.SqlVars...).Scan(&id))
-		}
-
-		if !scope.HasError() {
-			scope.SetColumn(scope.PrimaryKey(), id)
+			if primaryField == nil {
+				if results, err := scope.SqlDB().Exec(scope.Sql, scope.SqlVars...); err == nil {
+					scope.db.RowsAffected, _ = results.RowsAffected()
+				} else {
+					scope.Err(err)
+				}
+			} else {
+				if err := scope.Err(scope.SqlDB().QueryRow(scope.Sql, scope.SqlVars...).Scan(primaryField.Field.Addr().Interface())); err == nil {
+					scope.db.RowsAffected = 1
+				} else {
+					scope.Err(err)
+				}
+			}
 		}
 	}
 }
 
 func AfterCreate(scope *Scope) {
-	scope.CallMethod("AfterCreate")
-	scope.CallMethod("AfterSave")
+	scope.CallMethodWithErrorCheck("AfterCreate")
+	scope.CallMethodWithErrorCheck("AfterSave")
 }
 
 func init() {
